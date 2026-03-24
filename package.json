@@ -12,10 +12,10 @@
   "license": "ISC",
   "dependencies": {
     "@chainsafe/persistent-merkle-tree": "^0.8.0",
-    "@lodestar/api": "^1.23.1",
-    "@lodestar/config": "^1.23.1",
-    "@lodestar/params": "^1.23.1",
-    "@lodestar/types": "^1.23.1",
+    "@lodestar/api": "^1.35.0",
+    "@lodestar/config": "^1.35.0",
+    "@lodestar/params": "^1.35.0",
+    "@lodestar/types": "^1.35.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2"
