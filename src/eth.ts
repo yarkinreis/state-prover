@@ -25,7 +25,12 @@ export class EthAPI {
             throw new Error(`Undefined chain config for network ${network}`);
         }
         this.config = createChainForkConfig(networkToConfig[network]);
-        this.consensus = getClient({ baseUrl: beaconURL }, { config: this.config })
+        // Historical-state requests force the beacon node to regenerate the state,
+        // which takes ~93s on a large archive. @lodestar/api defaults to 60s
+        // (DEFAULT_TIMEOUT_MS) and aborts first, surfacing as
+        // "Timeout getStateFork request".
+        const timeoutMs = Number(process.env.BEACON_TIMEOUT_MS ?? 900_000);
+        this.consensus = getClient({ baseUrl: beaconURL, globalInit: { timeoutMs } }, { config: this.config })
     }
 
     async getForkNameByStateId(stateId: string): Promise<ForkName> {
