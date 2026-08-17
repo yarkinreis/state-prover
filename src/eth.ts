@@ -1,7 +1,7 @@
 import { BeaconState } from "@lodestar/types"
 import { ApiClient, ApiError, getClient } from "@lodestar/api";
 import { ChainConfig, ChainForkConfig, createChainForkConfig } from "@lodestar/config"
-import { holeskyChainConfig, mainnetChainConfig, sepoliaChainConfig } from "@lodestar/config/networks";
+import { holeskyChainConfig, hoodiChainConfig, mainnetChainConfig, sepoliaChainConfig } from "@lodestar/config/networks";
 import { ForkName } from "@lodestar/params";
 import { CompactMultiProof, ProofType, SingleProof, Tree, computeDescriptor } from "@chainsafe/persistent-merkle-tree";
 import { LodestarError } from "./errors.js";
@@ -13,7 +13,7 @@ const networkToConfig: { [key in NETWORK]: ChainConfig; } = {
     "holesky": holeskyChainConfig,
     "sepolia": sepoliaChainConfig,
     "mainnet": mainnetChainConfig,
-    "hoodi": mainnetChainConfig
+    "hoodi": hoodiChainConfig
 };
 
 export class EthAPI {
@@ -34,6 +34,15 @@ export class EthAPI {
     }
 
     async getForkNameByStateId(stateId: string): Promise<ForkName> {
+        // 0) Slot-addressed states resolve locally from the chain config. getStateFork
+        // forces the node to regenerate the whole historical state (~90s on a large
+        // validator set) purely to read a 4-byte fork version, and getStateProof then
+        // regenerates it a second time. Computing the fork from the slot skips the
+        // first regen entirely and halves the cost of a proof request.
+        if (/^\d+$/.test(stateId)) {
+            return this.config.getForkName(Number(stateId));
+        }
+
         // 1) Try the fast path: match the node's currentVersion against this.config
         const forkRes = await this.consensus.beacon.getStateFork({ stateId });
         if (!forkRes.ok) throw new LodestarError(forkRes.error() as ApiError);
