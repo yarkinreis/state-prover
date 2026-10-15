@@ -1,5 +1,13 @@
 import { ApiError, HttpStatusCode } from "@lodestar/api";
 
+export class RequestError extends Error {
+    public readonly code = 400;
+}
+
+export class UnsupportedForkError extends Error {
+    public readonly code = 502;
+}
+
 export class LodestarError extends Error {
     public code: HttpStatusCode
     public operationId: string | undefined

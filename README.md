@@ -1,98 +1,95 @@
-# Lodestar prover
+# State prover
 
-The state_prover is a simple wrapper for the proof endpoints of Lodestar. The Lodestar prover provides two primary endpoints for generating Merkle inclusion proofs. These endpoints allow users to obtain proofs either directly from a beacon block or from the beacon state of a block. The endpoints are designed to accept requests with either a Merkle path or a specific generalized index (gindex).
+Generate single Merkle inclusion proofs from Lodestar's compact proof endpoints, without downloading a full beacon state or block. Both historical SSZ trees and Gloas progressive SSZ trees are supported.
 
 ## Setup
 
-- Copy `.env.template` to `.env` and populate it with your lodestar API URLs.
-- Run `yarn` to install necessary dependencies.
-- Execute `yarn serve` to start the server.
+1. Install Node.js 20.6 or newer.
+2. Run `npm ci`.
+3. Copy `.env.template` to `.env` and set the beacon API URL for each network you use. For local testing, only `HOODI_BEACON_API=http://127.0.0.1:9596` is needed. Public networks use the mainnet SSZ preset; custom minimal-preset devnets are not supported.
+4. Run `npm run serve`.
+
+The server uses port 3000 by default. `PORT` overrides it. `BEACON_TIMEOUT_MS` sets the upstream request timeout in milliseconds; the default is 900000 (15 minutes), allowing historical-state regeneration.
+
+Lodestar packages are pinned to 1.50.0, with SSZ 1.8.1 and persistent-merkle-tree 1.3.1. The beacon node must also run a compatible Gloas release and expose Lodestar's `/eth/v0/beacon/proof/*` routes. These are Lodestar-specific endpoints; an ordinary Beacon REST API from another client is insufficient.
+
+Both npm and Yarn lockfiles are maintained. Use `npm ci` or `yarn install --frozen-lockfile` for reproducible installs.
 
 ## Endpoints
 
-### Beacon Block Proof Endpoint
-
-This endpoint generates a Merkle inclusion proof for a given beacon block. The request must specify the block identifier and the path or gindex for which the proof is required.
-
 ```http
-GET /block_proof?block_id=<block_identifier>&[path=<merkle_path>|gindex=<gindex>]
+GET /state_proof?network=hoodi&state_id=<state_identifier>&path=<comma_separated_path>
+GET /state_proof?network=hoodi&state_id=<state_identifier>&gindex=<positive_decimal_integer>
+GET /block_proof?network=hoodi&block_id=<block_identifier>&path=<comma_separated_path>
+GET /block_proof?network=hoodi&block_id=<block_identifier>&gindex=<positive_decimal_integer>
+GET /has_state?network=hoodi&state_id=<state_identifier>
 ```
 
-* block_id: The block root of the beacon block (or a special value like 'head', or 'finalized').
-* path or gindex: The Merkle path or generalized index for which the proof is required. Paths are provided as a comma-separated string ie: "body,execution_payload,transactions".
+Specify exactly one of `path` or `gindex`. Paths accept both Beacon API snake_case names and Lodestar camelCase names. Array indices must be nonnegative safe integers within the SSZ schema's bounds. A path must resolve completely in the requested object's fork; removed fields and invalid nested paths return HTTP 400.
 
-#### Examples
+State identifiers accept a decimal slot, a state root, or `head`, `finalized`, `justified`, or `genesis`. Block identifiers accept a decimal slot, a block root, or those aliases. A state root is distinct from a block root. Mutable aliases are pinned to their root before requesting a proof. Historical objects must still be available on the node.
 
-```bash
- $ curl 'localhost:3000/block_proof?block_id=0x3684981bfe46f...&gindex=24332'
- $ curl 'localhost:3000/block_proof?block_id=head&path=body,execution_payload,transactions,32'
-```
+Networks are `mainnet`, `sepolia`, `hoodi`, and `holesky` (historical data). The default is `mainnet`. Requests for a network without a configured URL return HTTP 400, so include `network=hoodi` when only a local Hoodi node is configured.
 
-#### Example response
+### Response
 
 ```json
 {
   "type": "single",
-  "gindex": 24332,
-  "leaf": "<leaf_value>",
-  "witnesses": ["<witness_value_1>", "<witness_value_2>", "..."]
+  "gindex": "11459",
+  "leaf": "0x...",
+  "witnesses": ["0x...", "0x..."]
 }
 ```
 
-### Beacon State Merkle Proof Endpoint
+`leaf` and `witnesses` contain 32-byte hex values. Witnesses are ordered from the leaf toward the root. `/has_state` returns HTTP 200 if a root proof can be obtained and otherwise preserves the node's error status.
 
-The `/state_proof`` endpoint is designed to generate Merkle inclusion proofs
-from the beacon state. This is particularly useful for applications that require
-verification of specific pieces of state data within the beacon chain.
+**API change:** `gindex` is always a decimal string. Consumers should use `BigInt(response.gindex)` rather than `Number(response.gindex)`. Gindices remain bigint throughout proof generation, including compact proof descriptor construction.
 
-```http
-GET /block_proof?block_id=<block_identifier>&[path=<merkle_path>|gindex=<gindex>]
-```
+Invalid query parameters return HTTP 400. An unsupported fork or a mismatch between the resolved fork and the proof metadata returns HTTP 502 for path requests. Upstream errors, including missing historical states, preserve their HTTP status.
 
-* `state_id`: The identifier of the state in the beacon chain. This can be either the state_root, or a special value like 'head' to indicate the latest state.
-* `path` or `gindex`: The comma-separated path or generalized index for which the proof is required. This specifies the exact part of the state for which the proof is being requested. 
+## Gloas behavior
 
-#### Examples
+EIP-7688 converts `BeaconState` to a progressive container and its validator and balance lists to progressive lists. Each `Validator` remains an eight-field container. Paths and witness lengths change; consumers with fixed pre-Gloas indices or branch lengths need their own update.
+
+The prover reads the connected node's named fork versions and activation epochs from `/eth/v1/config/spec`, caching them for one minute. Numeric state slots use that schedule without fetching the historical state just to identify its fork. State-root queries use `/eth/v1/beacon/states/{state_id}/fork`. Unsupported forks are rejected rather than assigned an older schema.
+
+Path requests use the exact fork's schema. Raw `gindex` requests use the supplied path directly and skip fork lookup; callers are responsible for supplying the correct index. Pre-Gloas history continues to use its original SSZ layout.
+
+Validator-field paths such as `validators,0,withdrawal_credentials` resolve to the field itself. The existing two-step consumer flow also works: request `validators,0`, then derive a field index as `BigInt(gindex) * 8n + fieldOffset` and request that raw gindex. Offsets remain 0 through 7 in the existing Validator field order.
+
+Balances remain packed four uint64 values into each 32-byte leaf. The byte offset is `8 * (validatorIndex % 4)`. Gloas list element paths come from the progressive schema; fixed list-depth arithmetic is unsuitable.
+
+The beacon block's `state_root` path remains gindex 11. Gloas removes `body,execution_payload`; it cannot be resolved by falling back to Electra. Execution payloads move into the ePBS envelope and require a different proof design if your application needs their contents.
+
+References: [EIP-7688](https://eips.ethereum.org/EIPS/eip-7688), [EIP-7916](https://eips.ethereum.org/EIPS/eip-7916), [Lodestar 1.50.0](https://github.com/ChainSafe/lodestar/releases/tag/v1.50.0).
+
+## Local proof checks
+
+Start your compatible local Lodestar node, set the Hoodi URL in `.env`, and start the prover. Test each request separately:
 
 ```bash
- $ curl 'localhost:3000/state_proof?state_id=0x9a1a476900b9...&gindex=234543'
- $ curl 'localhost:3000/state_proof?state_id=head&path=historical_roots,12'
+curl 'http://localhost:3000/has_state?network=hoodi&state_id=finalized'
+curl 'http://localhost:3000/state_proof?network=hoodi&state_id=finalized&path=validators,0'
+curl 'http://localhost:3000/state_proof?network=hoodi&state_id=finalized&path=validators,0,withdrawal_credentials'
+curl 'http://localhost:3000/state_proof?network=hoodi&state_id=finalized&path=validators,0,slashed'
+curl 'http://localhost:3000/state_proof?network=hoodi&state_id=finalized&path=balances,0'
+curl 'http://localhost:3000/block_proof?network=hoodi&block_id=finalized&path=state_root'
 ```
 
-#### Example response
+For a complete verification, pin one block root, obtain its header and `state_root`, and use that same state root for all state proofs. Reconstruct each state proof using SHA-256 and the returned gindex and witnesses, then compare it with the header's state root. Reconstruct the block proof and compare it with the pinned block root. Separate calls to `finalized` can reference different roots as the chain advances.
 
-```json
-{
-  "type": "single",
-  "gindex": 37,
-  "leaf": "<leaf_value>",
-  "witnesses": ["<witness_value_1>", "<witness_value_2>", "..."]
-}
-```
+Repeat with fixed slots before and after the node's configured Gloas activation, all eight validator fields, and balance indices on either side of a four-value chunk boundary. Before Hoodi activation, use an already-active Gloas network or a mainnet-preset devnet with Gloas enabled to exercise the new trees.
 
-
-## Examples
+## Automated checks
 
 ```bash
-curl 'localhost:3000/state_proof?state_id=head&gindex=37'
-
-  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                 Dload  Upload   Total   Spent    Left  Speed
-100   464  100   464    0     0   1322      0 --:--:-- --:--:-- --:--:--  1352
-{
-  "type": "single",
-  "gindex": 37,
-  "leaf": "0xbcb9716517ffdbe366f5d01ad19ee694a1a11d8d42ed28bdb79f3449487497b7",
-  "witnesses": [
-    "0xd495e515288a100a2cb8c7e15d282e11ca03de42ad4930ac7d4bcfa2dd575e22",
-    "0x26b1b928c1ff8f8b31419d35a8fde34d1d7031875b8e020da0ad13ea5487a4d4",
-    "0x93be2d75412e06966eb6180cac7a09f840071c4a230bc9bdca3d81491f488182",
-    "0x5d118080e7c6cc1a366629ea384792412a974df81394375e21fecbdd65c2918e",
-    "0xa6b8fdab19502540773368abb9336e98fad638b37ff731efa1539248ab9bb9a1"
-  ]
-}
+npm run typecheck
+npm test
 ```
 
-# Acknowledgments
+The suite uses synthetic Fulu and Gloas SSZ states and local mock Beacon API servers. It checks schema-derived indices against independent expected values, reconstructs proof roots, exercises fork boundaries and malformed inputs, and verifies HTTP bigint serialization. It does not replace testing against your running archive node and on-chain verifier.
 
-- [Lodestar](https://lodestar.chainsafe.io): For exposing an amazing and super helpful set of endpoints to generate Merkle proofs without needing to download the whole block or state!
+## Acknowledgments
+
+[Lodestar](https://github.com/ChainSafe/lodestar) provides the compact proof endpoints and fork-specific SSZ schemas.
